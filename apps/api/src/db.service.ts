@@ -63,7 +63,21 @@ export class DbService implements OnModuleDestroy {
 
   private ensureSchema(): Promise<void> {
     this.ready ??= (async () => {
-      for (const statement of SCHEMA) await this.pool!.query(statement);
+      // Concurrent instances (serverless cold starts, parallel test files) race on CREATE TABLE IF NOT EXISTS,
+      // so serialize schema setup behind a transaction-scoped advisory lock.
+      const client = await this.pool!.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock(727274)');
+        for (const statement of SCHEMA) await client.query(statement);
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        this.ready = null;
+        throw err;
+      } finally {
+        client.release();
+      }
     })();
     return this.ready;
   }
